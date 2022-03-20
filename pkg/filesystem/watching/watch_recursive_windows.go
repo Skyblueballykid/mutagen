@@ -51,7 +51,7 @@ type recursiveWatcher struct {
 	// cancel is the run loop cancellation function.
 	cancel context.CancelFunc
 	// done is the run loop completion signaling mechanism.
-	done chan struct{}
+	done <-chan struct{}
 }
 
 // NewRecursiveWatcher creates a new FSEvents-based recursive watcher using the
@@ -137,18 +137,22 @@ func NewRecursiveWatcher(target string, filter Filter) (RecursiveWatcher, error)
 	// Create a context to regulate the watcher's run loop.
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Create a channel to track completion of the watcher's run loop.
+	done := make(chan struct{})
+
 	// Create the watcher.
 	watcher := &recursiveWatcher{
 		watch:  watch,
 		events: make(chan map[string]bool),
 		errors: make(chan error, 1),
 		cancel: cancel,
-		done:   make(chan struct{}),
+		done:   done,
 	}
 
 	// Start the run loop.
 	go func() {
 		watcher.errors <- watcher.run(ctx, watchRoot, initialWatchRootMetadata, target, filter)
+		close(done)
 	}()
 
 	// Success.
@@ -157,9 +161,6 @@ func NewRecursiveWatcher(target string, filter Filter) (RecursiveWatcher, error)
 
 // run implements the event processing run loop for recursiveWatcher.
 func (w *recursiveWatcher) run(ctx context.Context, watchRoot string, initialWatchRootMetadata os.FileInfo, target string, filter Filter) error {
-	// Signal completion when done.
-	defer close(w.done)
-
 	// Compute the prefix that we'll use to (a) filter events to those occurring
 	// at or under the target and (b) trim off to make paths target-relative
 	// (assuming they aren't the target itself). Note that filepath.EvalSymlinks
@@ -197,7 +198,7 @@ func (w *recursiveWatcher) run(ctx context.Context, watchRoot string, initialWat
 	// and the coalescing timer has fired.
 	var pendingTarget chan<- map[string]bool
 
-	// Loop indefinitely, polling for cancellation, events, and root checks.
+	// Perform event forwarding until cancellation or failure.
 	for {
 		select {
 		case <-ctx.Done():
